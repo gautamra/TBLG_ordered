@@ -27,7 +27,7 @@ sample_len=args.sample_len
 path=args.path
 nu=-0.000
 
-path="DataU2/beta_{:.2f}/".format(beta)
+path="../DataU2/nu_-0.00/beta_{:.2f}/".format(beta)
 if args.path:
     path=args.path
 if mpi.is_master_node():
