@@ -36,6 +36,7 @@ W1 = 44.03
 W3 = 50.20
 V = 48.33
 J = 16.38
+U2 = 2.329
 
 def sample_BZ_direct(sample_len):
     K = 1.703 # 1/Angstrom
@@ -162,7 +163,7 @@ def mean_field_terms(dm, spin):
     Ofcpp = dm_spin[-4:,4:-4]
     
     # Hartree W and V terms and residual U Hartree shift
-    Hff += (-3.5*U + nu_c3*W1 + nu_c1p2*W3)*np.eye(4)
+    Hff += (-3.5*U + nu_c3*W1 + nu_c1p2*W3 + 6*U2*nu_f)*np.eye(4)
     H33 += nu_f*W1*np.eye(4) + (nu_c3 + nu_c1p2)*V*np.eye(4)
     HMM += nu_f*W3*np.eye(4) + (nu_c3 + nu_c1p2)*V*np.eye(4)
     

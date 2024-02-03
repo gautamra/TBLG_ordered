@@ -1,52 +1,64 @@
 from m2_helper import *
 
+from pathlib import Path
+
 import argparse
 parser=argparse.ArgumentParser()
 parser.add_argument("beta", help="inverse temperature", type=float)
 parser.add_argument("loops", help="number of DMFT loops", type=int)
-parser.add_argument("log_n", help="10^log_n number of QMC cycles", type=int)
+parser.add_argument("log_n_cycles", help='number of measurements per core = 10^log_n_markov', type=int)
+parser.add_argument("n_cores", help='number of cores', type=int)
 parser.add_argument("polarizer", help="field that polarizes to the starting condition", type=float)
-parser.add_argument("--mix", help="0.51-1.0 default:0.9", type = float)
+parser.add_argument("--mix", help="0.51-1.0 default:0.9", type = float, default=0.9)
 parser.add_argument("--symm", help="K-IVC or IVC default:K-IVC", type = str)
+parser.add_argument("--filename", help="override default filename", type = str)
+parser.add_argument("--path", help="override default pathname", type = str)
+parser.add_argument("--sample_len", help="set sampling resolution of k-mesh", type=int, default=9)
 parser.add_argument("--restart_from", help="neglect all runs after", type = int)
 args=parser.parse_args()
 beta = args.beta
-log_n = args.log_n
+log_n_cycles = args.log_n_cycles
 loops = args.loops
 polarizer = args.polarizer
+n_cores=args.n_cores
+mix=args.mix
+sample_len=args.sample_len
+path=args.path
+nu=-2.000
+
+path="../DataU2/nu_-2.00/beta_{:.2f}/".format(beta)
+if args.path:
+    path=args.path
+if mpi.is_master_node():
+    Path(path).mkdir(parents=True, exist_ok=True)
+filename="nu_{:.3f}".format(nu)
+if args.filename:
+    filename=args.filename
+filename=path+filename
 
 ###################### Check nu, beta, and pick filename for set of system params
-nu = -2.0
 broken_symm = 'K-IVC'
 Boltzmann=8.617333262e-5*1000
 T=1/(Boltzmann*beta)
-p={}
-p['fit_min_n'] = int(160*T**(-0.9577746167096538))
-p["fit_max_n"] = int(209*T**(-0.767031728744396))
-p["imag_threshold"] = 1e-10
-filename = 'Data/beta_{:.2f}/nu_{:.2f}'.format(beta, nu)
-################### 
-
-# Not to be touched
-mix = 0.9
-if args.mix:
-    mix = args.mix
-    # filename = filename+"mix_{:.2f}".format(mix)
+#####
 if args.symm:
     broken_symm=args.symm
     filename = 'Data/'+broken_symm+'/'+filename[5:]
-p["n_cycles"] = (10**log_n)//(160*4)
 constrain=False
-sample_len = 9
 BZ_sampling, weights = sample_BZ_direct(sample_len)
 n_iw = 1025
 prec_mu = 0.001
 if polarizer>0:
     prec_mu = prec_mu*10
+p={}
+p["n_cycles"] = (10**log_n_cycles)
 p["length_cycle"] = 1000
 p["n_warmup_cycles"] = 5000
 p["perform_tail_fit"] = True
 p["fit_max_moment"] = 4
+p['fit_min_n'] = int(160*T**(-0.9577746167096538))
+p["fit_max_n"] = int(209*T**(-0.767031728744396))
+p["imag_threshold"] = 1e-10
 
 #################### Choose the right symmetry-breaking here:
 if broken_symm == 'K-IVC':
@@ -147,7 +159,7 @@ previous_present = mpi.bcast(previous_present)
 # TODO Save run parameters
 if mpi.is_master_node():
     with HDFArchive(filename+'.h5', 'a') as ar:
-        ar['dmft_output']['params_%i-%i'%(previous_runs+1, loops+previous_runs)] = (loops, p['n_cycles'], mix, constrain, polarizer)
+        ar['dmft_output']['params_%i-%i'%(previous_runs+1, loops+previous_runs)] = (loops, p['n_cycles'], n_cores, mix, constrain, polarizer)
 
 
 for iteration_number in range(1,loops+1):
@@ -312,6 +324,13 @@ for iteration_number in range(1,loops+1):
             ar['dmft_output']['Sigma_iw-%i'%(iteration_number + previous_runs)] = S.Sigma_iw
             ar['dmft_output']['mu-%i'%(iteration_number + previous_runs)] = chemical_potential
             ar['dmft_output']['dm-%i'%(iteration_number + previous_runs)] = dm
+            
+            if iteration_number==1:
+                ar['dmft_output'].create_group('args-{:03d}-{:03d}'.format(previous_runs+1,previous_runs+loops))
+                print(ar['dmft_output'].keys())
+                for k, v in vars(args).items():
+                    if v!=None:
+                        ar['dmft_output']['args-{:03d}-{:03d}'.format(previous_runs+1,previous_runs+loops)][k] = v
         print('saved sigma, G etc')
     
     SK.save(['chemical_potential','dc_imp','dc_energ'])
