@@ -1,4 +1,4 @@
-from CNP_helper import *
+from symm_helper import *
 
 import argparse
 parser=argparse.ArgumentParser()
@@ -16,7 +16,6 @@ nu = args.nu
 nu_from = args.nu_from
 
 ###################### Check nu, beta, and pick filename for set of system params
-broken_symm = 'K-IVC'
 Boltzmann=8.617333262e-5*1000
 T=1/(Boltzmann*beta)
 p={}
@@ -27,31 +26,42 @@ filename = 'Data/beta_{:.2f}/nu_{:.2f}'.format(beta, nu)
 filename_from = 'Data/beta_{:.2f}/nu_{:.2f}'.format(beta, nu_from)
 if not os.path.isfile(filename_from):
     raise ValueError("file {} does not exist".format(filename_from))
+if nu==-0.0:
+    phsymm=False
+else:
+    phsymm=False
 ################### 
 
 # Not to be touched
-constrain=False
+polarizer = 0
 mix = 0.9
 if args.mix:
     mix = args.mix
     print(mix)
     filename = filename+"mix_{:.2f}".format(mix)
+p["n_cycles"] = (10**log_n)//160
+constrain=False
 sample_len = 9
 BZ_sampling, weights = sample_BZ_direct(sample_len)
 n_iw = 1025
 prec_mu = 0.001
-p["n_cycles"] = 10**log_n//160
 p["length_cycle"] = 1000
 p["n_warmup_cycles"] = 5000
 p["perform_tail_fit"] = True
 p["fit_max_moment"] = 4
 
 #################### Choose the right symmetry-breaking here:
-if broken_symm == 'K-IVC':
-    deg_shells = [[['up_0', 'up_1'],['down_0', 'down_1']]]
-else:
-    raise ValueError("Broken symmetry can only by K-IVC right now.")
-
+dm_init = {}
+dm_init['up'] = lin.block_diag(np.diag([1/2,1/2,1/2,1/2]),np.diag([1/2,1/2,1/2,1/2]), + (1/2+nu/8)*np.eye(4))
+dm_init['down'] = lin.block_diag(np.diag([1/2,1/2,1/2,1/2]),np.diag([1/2,1/2,1/2,1/2]), + (1/2+nu/8)*np.eye(4))
+deg_shells = [[['up_0', 'up_1', 'up_2', 'up_3', 'down_0', 'down_1', 'down_2', 'down_3']]]
+    
+def symm_ph(Sigma):
+    c = Sigma['down_0'](0)[0,0].real
+    for name, Sig in Sigma:
+        if mpi.is_master_node():
+            print('enforcing ph symmetry assuming symmetric state')
+        Sig.real<<c
 
 def set_converter(H):
     ## Write a converter for dft_tools
@@ -118,35 +128,48 @@ previous_present = mpi.bcast(previous_present)
 # TODO Save run parameters
 if mpi.is_master_node():
     with HDFArchive(filename+'.h5', 'a') as ar:
-        ar['dmft_output']['params_%i-%i'%(previous_runs+1, loops+previous_runs+1)] = (loops, p['n_cycles'], mix, constrain)    
+        ar['dmft_output']['params_%i-%i'%(previous_runs+1, loops+previous_runs)] = (loops, p['n_cycles'], mix, polarizer, nu_from)
+
 
 for iteration_number in range(1,loops+1):
     if mpi.is_master_node(): print("Iteration = ", iteration_number)
 
     if not previous_present and iteration_number==1:
-        dm = 0
-        if mpi.is_master_node():
-            with HDFArchive(filename_from+'.h5', 'r') as ar:
-                iterations = ar['dmft_output']['iterations'] 
-                dm = ar['dmft_output']['dm-%i'%iterations] 
-            with HDFArchive(filename+'.h5', 'a') as ar:
-                ar['dmft_output']['dm-0'] = dm
+        if nu_from==nu:
+            dm = dm_init
+            if mpi.is_master_node():
+                with HDFArchive(filename+'.h5', 'a') as ar:
+                    ar['dmft_output']['dm-0'] = dm
+        else:
+            dm = 0
+            if mpi.is_master_node():
+                with HDFArchive(filename_from+'.h5', 'r') as ar:
+                    iterations = ar['dmft_output']['iterations'] 
+                    dm = ar['dmft_output']['dm-%i'%iterations] 
+                with HDFArchive(filename+'.h5', 'a') as ar:
+                    ar['dmft_output']['dm-0'] = dm
+     
     if previous_present and iteration_number==1:
         dm = 0
         if mpi.is_master_node():
             with HDFArchive(filename+'.h5', 'r') as ar:
                 iterations = ar['dmft_output']['iterations']
-                dm = ar['dmft_output']['dm-%i'%iterations]    
+                dm = ar['dmft_output']['dm-%i'%iterations]
+        
     dm = mpi.bcast(dm)
-    
     Hmf = {}
+    
     Hmf['up'] = mean_field_terms(dm, spin='up')
     Hmf['down'] = mean_field_terms(dm, spin='down')
     if constrain:
         Hmf['up'] = mean_field_terms(dm_init, spin='up')
         Hmf['down'] = mean_field_terms(dm_init, spin='down')
+        
+    H_pol = {}
+    H_pol['up'] = -polarizer*(dm_init['up'] - lin.block_diag(1/2*np.eye(8), (1/2+nu/8)*np.eye(4) ))
+    H_pol['down'] = -polarizer*(dm_init['down'] - lin.block_diag(1/2*np.eye(8), (1/2+nu/8)*np.eye(4) ))
 
-    H = lambda kx, ky: H0(kx, ky) + Hmf['up']
+    H = lambda kx, ky: H0(kx, ky) + Hmf['up'] + H_pol['up']
     set_converter(H)
     if mpi.is_master_node():
         # add spin down part
@@ -159,44 +182,58 @@ for iteration_number in range(1,loops+1):
             hopping1 = f['dft_input']['hopping']
             hopping2 = hopping1.copy()
             for ik in range(len(BZ_sampling)):
-                hopping2[ik,0,:,:] = H0(*BZ_sampling[ik]) + Hmf['down']
+                hopping2[ik,0,:,:] = H0(*BZ_sampling[ik]) + Hmf['down']+ H_pol['down']
             f['dft_input']['hopping'] = np.concatenate((hopping1, hopping2), axis = 1)
             
     SK = SumkDFT(hdf_file=filename+'.h5',use_dft_blocks=True)
     SK.calculate_diagonalization_matrix(write_to_blockstructure=True)
 
+    
     n_orb = SK.corr_shells[0]['dim']
     spin_names = ["up","down"]
     orb_names = [i for i in range(n_orb)]
     gf_struct = SK.gf_struct_solver_list[0]
     Umat, Upmat = U_matrix_kanamori(n_orb=n_orb, U_int=U, J_hund=0)
     h_int = h_int_density(spin_names, orb_names, map_operator_structure=SK.sumk_to_solver[0], U=Umat, Uprime=Upmat)
-    S = Solver(beta=beta, gf_struct=gf_struct) 
+    S = Solver(beta=beta, gf_struct=gf_struct)
+    
 
     if not previous_present and iteration_number==1:
+        if nu_from==nu:
+            tt = SK.block_structure.effective_transformation_solver[0]
+            for name, Sig in S.Sigma_iw:
+                if 'up' in name:
+                    temp = -tt[name]@Hmf['up'][-4:,-4:]@(tt[name].conjugate().T)
+                    Sig << np.diag([np.average(np.diag(temp))]*len(temp))
+                elif 'down' in name:
+                    temp = -tt[name]@Hmf['down'][-4:,-4:]@(tt[name].conjugate().T)
+                    Sig << np.diag([np.average(np.diag(temp))]*len(temp))
+                else:
+                    raise("problem with self-energy initialization")
+        else:
+            if mpi.is_master_node():
+                with HDFArchive(filename_from+'.h5', 'r') as ar:
+                    iterations = ar['dmft_output']['iterations'] 
+                    S.Sigma_iw = ar['dmft_output']['Sigma_iw-%i'%iterations] 
+                with HDFArchive(filename+'.h5', 'a') as ar:
+                    ar['dmft_output']['Sigma_iw-0'] = S.Sigma_iw
+
         if mpi.is_master_node():
-            with HDFArchive(filename_from+'.h5', 'r') as ar:
-                iterations = ar['dmft_output']['iterations'] 
-                S.Sigma_iw = ar['dmft_output']['Sigma_iw-%i'%iterations]
-                chemical_potential = ar['dmft_output']['mu-%i'%iterations]
             with HDFArchive(filename+'.h5', 'a') as ar:
                 ar['dmft_output']['Sigma_iw-0'] = S.Sigma_iw
-                ar['dmft_output']['mu-0'] = chemical_potential
-
-    chemical_potential=0
+                
     if mpi.is_master_node():
         with HDFArchive(filename+'.h5', 'r') as ar:
             S.Sigma_iw = ar['dmft_output']['Sigma_iw-%i'%(iteration_number+previous_runs-1)]
-            chemical_potential = ar['dmft_output']['mu-%i'%(iteration_number+previous_runs-1)]
     S.Sigma_iw << mpi.bcast(S.Sigma_iw)
-    chemical_potential = mpi.bcast(chemical_potential)
-    SK.set_mu(chemical_potential)
     
     SK.deg_shells = deg_shells
     if mpi.is_master_node():
         print(("The degenerate shells are ", SK.deg_shells))
     if iteration_number>1 or previous_present:    
         SK.symm_deg_gf(S.Sigma_iw,ish=0)
+        if phsymm:
+            symm_ph(S.Sigma_iw)
         
     SK.set_Sigma([ S.Sigma_iw ])                            # put Sigma into the SumK class
     chemical_potential = SK.calc_mu(precision = prec_mu , delta = 10)  # find the chemical potential for given density
@@ -217,6 +254,8 @@ for iteration_number in range(1,loops+1):
         
     Sigma_symm = S.Sigma_iw.copy()
     SK.symm_deg_gf(Sigma_symm,ish=0)
+    if phsymm:
+        symm_ph(Sigma_symm)
     SK.set_Sigma([Sigma_symm])
     dm = {}
     dm['up'] = 1j*np.zeros((12,12))
