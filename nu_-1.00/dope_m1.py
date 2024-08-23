@@ -1,4 +1,4 @@
-from CNP_helper import *
+from m1_helper import *
 
 import argparse
 parser=argparse.ArgumentParser()
@@ -8,6 +8,7 @@ parser.add_argument("log_n", help="10^log_n number of QMC cycles", type=int)
 parser.add_argument("nu", help="filling", type=float)
 parser.add_argument("nu_from", help="seed filling", type=float)
 parser.add_argument("--mix", help="0.51-1.0 default:0.9", type = float)
+parser.add_argument("--restart_from", help="neglect all runs after", type = int)
 args=parser.parse_args()
 beta = args.beta
 log_n = args.log_n
@@ -16,7 +17,7 @@ nu = args.nu
 nu_from = args.nu_from
 
 ###################### Check nu, beta, and pick filename for set of system params
-broken_symm = 'K-IVC'
+broken_symm = 'K-IVC+VP'
 Boltzmann=8.617333262e-5*1000
 T=1/(Boltzmann*beta)
 p={}
@@ -47,10 +48,10 @@ p["perform_tail_fit"] = True
 p["fit_max_moment"] = 4
 
 #################### Choose the right symmetry-breaking here:
-if broken_symm == 'K-IVC':
-    deg_shells = [[['up_0', 'up_1'],['down_0', 'down_1']]]
+if broken_symm == 'K-IVC+VP':
+    deg_shells = [[['up_0', 'up_1'], ['down_2', 'down_3']]]
 else:
-    raise ValueError("Broken symmetry can only by K-IVC right now.")
+    raise ValueError("Broken symmetry can only by K-IVC+VP right now.")
 
 
 def set_converter(H):
@@ -110,6 +111,8 @@ if mpi.is_master_node():
                 if 'iterations' in ar:
                     previous_present = True
                     previous_runs = ar['iterations']
+                    if args.restart_from:
+                        previous_runs=args.restart_from
             else:
                 f.create_group('dmft_output')
 previous_runs = mpi.bcast(previous_runs)
@@ -135,8 +138,7 @@ for iteration_number in range(1,loops+1):
         dm = 0
         if mpi.is_master_node():
             with HDFArchive(filename+'.h5', 'r') as ar:
-                iterations = ar['dmft_output']['iterations']
-                dm = ar['dmft_output']['dm-%i'%iterations]    
+                dm = ar['dmft_output']['dm-%i'%previous_runs]    
     dm = mpi.bcast(dm)
     
     Hmf = {}
@@ -172,7 +174,7 @@ for iteration_number in range(1,loops+1):
     Umat, Upmat = U_matrix_kanamori(n_orb=n_orb, U_int=U, J_hund=0)
     h_int = h_int_density(spin_names, orb_names, map_operator_structure=SK.sumk_to_solver[0], U=Umat, Uprime=Upmat)
     S = Solver(beta=beta, gf_struct=gf_struct) 
-
+    
     if not previous_present and iteration_number==1:
         if mpi.is_master_node():
             with HDFArchive(filename_from+'.h5', 'r') as ar:
@@ -214,10 +216,10 @@ for iteration_number in range(1,loops+1):
 
     if mpi.is_master_node():
         mpi.report("Total charge of impurity problem : %.6f"%S.G_iw.total_density())
-        
+    
     Sigma_symm = S.Sigma_iw.copy()
     SK.symm_deg_gf(Sigma_symm,ish=0)
-    SK.set_Sigma([Sigma_symm])
+    SK.set_Sigma([Sigma_symm])   
     dm = {}
     dm['up'] = 1j*np.zeros((12,12))
     dm['down'] = 1j*np.zeros((12,12))
@@ -230,8 +232,6 @@ for iteration_number in range(1,loops+1):
         if mpi.is_master_node():
             mpi.report("Symmetrizing density. The largest imaginary component in the diagonal of the density matrix is {}".format(np.max(np.abs(np.diag(dm[name].imag)))))
         dm[name] = 1/2*(dm[name] + dm[name].conjugate().T)
-    dm['up'] = 1/2*(dm['up'] + dm['down'])
-    dm['down'] = dm['up'].copy()
 
     if mpi.is_master_node():
         with HDFArchive(filename+'.h5','r') as ar:
